@@ -1,6 +1,6 @@
 {
   "name": "@bubblelab/bubble-core",
-  "version": "0.1.189",
+  "version": "0.1.190",
   "type": "module",
   "license": "Apache-2.0",
   "main": "./dist/index.js",
@@ -52,8 +52,8 @@
     "@sendsafely/sendsafely": "^3.0.1",
     "@types/pg": "^8.15.4",
     "@typescript-eslint/typescript-estree": "8.46.0",
+    "@napi-rs/canvas": "^0.1.68",
     "chart.js": "^4.5.0",
-    "chartjs-node-canvas": "^5.0.0",
     "pg": "^8.16.3",
     "puppeteer-core": "^24.10.0",
     "resend": "^4.8.0",

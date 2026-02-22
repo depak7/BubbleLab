@@ -185,7 +185,12 @@ export function markdownToMrkdwn(markdown: string): string {
  * Image hosting domains whose URLs should render as Slack image blocks
  * instead of raw URL text.
  */
-const IMAGE_URL_HOSTS = ['quickchart.io', 'i.imgur.com', 'imgur.com'];
+const IMAGE_URL_HOSTS = [
+  'quickchart.io',
+  'i.imgur.com',
+  'imgur.com',
+  'r2.cloudflarestorage.com',
+];
 const IMAGE_URL_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
 
 /**

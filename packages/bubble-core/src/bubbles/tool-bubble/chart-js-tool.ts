@@ -5,9 +5,14 @@ import {
 } from '../../types/tool-bubble-class.js';
 import type { BubbleContext } from '../../types/bubble.js';
 import { CredentialType } from '@bubblelab/shared-schemas';
-import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
+import { createCanvas } from '@napi-rs/canvas';
+import { Chart, registerables } from 'chart.js';
+import type { ChartConfiguration } from 'chart.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+
+// Register all Chart.js components once at module level
+Chart.register(...registerables);
 
 // Define supported chart types
 const ChartType = z.enum([
@@ -826,16 +831,82 @@ export class ChartJSTool extends ToolBubble<
   ): Promise<Buffer> {
     const { width, height } = dimensions;
 
-    const chartJSNodeCanvas = new ChartJSNodeCanvas({
-      width,
-      height,
-      backgroundColour: 'white',
-    });
-
     console.log(
       `🎨 [ChartJSTool] Rendering chart to buffer (${width}x${height})...`
     );
-    return chartJSNodeCanvas.renderToBuffer(chartConfig as any);
+
+    // Use 2x DPI for crisp images
+    const dpr = 2;
+    const canvas = createCanvas(width * dpr, height * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    // Fill white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, width, height);
+
+    // Scale up default font sizes so text is readable at the larger pixel size
+    const existingOptions = (chartConfig.options ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const existingPlugins = (existingOptions.plugins ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const existingTitle = (existingPlugins.title ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const existingLegend = (existingPlugins.legend ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const existingLegendLabels = (existingLegend.labels ?? {}) as Record<
+      string,
+      unknown
+    >;
+
+    const chart = new Chart(canvas as unknown as HTMLCanvasElement, {
+      ...(chartConfig as unknown as ChartConfiguration),
+      options: {
+        ...existingOptions,
+        responsive: false,
+        animation: false,
+        font: {
+          size: 14,
+          ...((existingOptions.font as Record<string, unknown>) ?? {}),
+        },
+        plugins: {
+          ...existingPlugins,
+          title: {
+            ...existingTitle,
+            font: {
+              size: 18,
+              weight: 'bold' as const,
+              ...((existingTitle.font as Record<string, unknown>) ?? {}),
+            },
+          },
+          legend: {
+            ...existingLegend,
+            labels: {
+              ...existingLegendLabels,
+              font: {
+                size: 13,
+                ...((existingLegendLabels.font as Record<string, unknown>) ??
+                  {}),
+              },
+            },
+          },
+        },
+      },
+    });
+    chart.draw();
+
+    const pngBuffer = canvas.toBuffer('image/png');
+    chart.destroy();
+
+    return Buffer.from(pngBuffer);
   }
 
   /**
