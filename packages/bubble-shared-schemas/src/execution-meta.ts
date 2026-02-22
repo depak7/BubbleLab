@@ -23,6 +23,7 @@ export interface ExecutionMeta {
   flowId?: number;
   executionId?: number;
   studioBaseUrl?: string;
+  apiBaseUrl?: string;
   // Thinking message
   _thinkingMessageTs?: string;
   _thinkingMessageChannel?: string;

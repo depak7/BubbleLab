@@ -17,6 +17,7 @@ export const BLOCKS = {
   engagementMatrix: load('engagement-matrix.md'),
   multiTableStatus: load('multi-table-status.md'),
   calendarAnnouncement: load('calendar-announcement.md'),
+  pricingComparisonCharts: load('pricing-comparison-charts.md'),
 } as const;
 
 export const BATCH_BLOCKS = [1, 2, 3, 4, 5].map((i) =>

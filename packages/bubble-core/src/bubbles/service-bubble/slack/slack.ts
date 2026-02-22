@@ -1337,6 +1337,7 @@ export type SlackOperationResult<T extends SlackParams['operation']> = Extract<
 interface SlackApiError {
   ok: false;
   error: string;
+  errors?: string[];
   response_metadata?: {
     warnings?: string[];
     messages?: string[];
@@ -1540,11 +1541,11 @@ Comprehensive Slack integration for messaging and workspace management.
       icon_url,
       attachments,
       blocks,
-      thread_ts,
       reply_broadcast,
       unfurl_links,
       unfurl_media,
     } = params;
+    let { thread_ts } = params;
 
     // Resolve channel name to ID if needed
     const resolvedChannel = await this.resolveChannelId(channel);
@@ -1567,13 +1568,29 @@ Comprehensive Slack integration for messaging and workspace management.
     // Check if we should replace a thinking placeholder message
     const thinkingTs = executionMeta?._thinkingMessageTs;
     const thinkingChannel = executionMeta?._thinkingMessageChannel;
-    const shouldUpdateThinking =
+    const shouldReplaceThinking =
       thinkingTs && thinkingChannel && resolvedChannel === thinkingChannel;
 
-    // Clear thinking fields so subsequent sends in the same flow post normally
-    if (shouldUpdateThinking && executionMeta) {
+    // Delete the thinking placeholder and post a fresh message instead of
+    // using chat.update, which has a stricter payload size limit and fails
+    // with msg_too_long on messages that chat.postMessage handles fine.
+    if (shouldReplaceThinking && executionMeta) {
       delete executionMeta._thinkingMessageTs;
       delete executionMeta._thinkingMessageChannel;
+
+      // Preserve thread context so the new message appears in the same thread
+      if (!thread_ts && thinkingTs) {
+        thread_ts = thinkingTs;
+      }
+
+      // Fire-and-forget delete of the placeholder
+      this.makeSlackApiCall('chat.delete', {
+        channel: resolvedChannel,
+        ts: thinkingTs,
+      }).catch(() => {
+        // Best-effort: if delete fails (e.g. permissions), the new message
+        // still posts and the placeholder becomes stale but harmless.
+      });
     }
 
     // Slack only allows one table block per message.
@@ -1601,7 +1618,6 @@ Comprehensive Slack integration for messaging and workspace management.
             unfurl_media,
           },
           footerBlocks,
-          shouldUpdateThinking ? thinkingTs : undefined,
           tableChunks as unknown as (typeof finalBlocks)[]
         );
       }
@@ -1626,8 +1642,7 @@ Comprehensive Slack integration for messaging and workspace management.
           unfurl_links,
           unfurl_media,
         },
-        footerBlocks,
-        shouldUpdateThinking ? thinkingTs : undefined
+        footerBlocks
       );
     }
 
@@ -1665,14 +1680,41 @@ Comprehensive Slack integration for messaging and workspace management.
       body.reply_broadcast = reply_broadcast;
     }
 
-    // Replace thinking placeholder or post new message
-    if (shouldUpdateThinking) {
-      body.ts = thinkingTs;
+    let response = await this.makeSlackApiCall('chat.postMessage', body);
+
+    // If Slack rejects the message because it can't download an image,
+    // strip only the broken image blocks (by index from the error) and retry
+    // so valid images and the rest of the message still get delivered.
+    if (
+      !response.ok &&
+      response.error === 'invalid_blocks' &&
+      Array.isArray(response.errors) &&
+      body.blocks
+    ) {
+      const imageErrors = (response.errors as string[]).filter(
+        (e) => typeof e === 'string' && e.includes('downloading image failed')
+      );
+      if (imageErrors.length > 0) {
+        // Extract broken block indices from json-pointer paths like
+        // "downloading image failed [json-pointer:/blocks/8/image_url]"
+        const brokenIndices = new Set<number>();
+        for (const err of imageErrors) {
+          const match = err.match(/\/blocks\/(\d+)\//);
+          if (match) brokenIndices.add(Number(match[1]));
+        }
+
+        const blocks = body.blocks as Array<Record<string, unknown>>;
+        const filtered =
+          brokenIndices.size > 0
+            ? blocks.filter((_, i) => !brokenIndices.has(i))
+            : blocks.filter((b) => b.type !== 'image'); // fallback: strip all images
+
+        if (filtered.length > 0 && filtered.length < blocks.length) {
+          body.blocks = filtered;
+          response = await this.makeSlackApiCall('chat.postMessage', body);
+        }
+      }
     }
-    const response = await this.makeSlackApiCall(
-      shouldUpdateThinking ? 'chat.update' : 'chat.postMessage',
-      body
-    );
 
     return {
       operation: 'send_message',
@@ -1713,7 +1755,6 @@ Comprehensive Slack integration for messaging and workspace management.
       unfurl_media?: boolean;
     },
     footerBlocks: Record<string, unknown>[] = [],
-    thinkingMessageTs?: string,
     preSplitChunks?: (typeof blocks)[]
   ): Promise<Extract<SlackResult, { operation: 'send_message' }>> {
     // Use pre-split chunks (e.g. from multi-table splitting) or split by size
@@ -1779,14 +1820,7 @@ Comprehensive Slack integration for messaging and workspace management.
         body.attachments = options.attachments;
       }
 
-      // First chunk replaces thinking placeholder if available; all others post normally
-      if (isFirstChunk && thinkingMessageTs) {
-        body.ts = thinkingMessageTs;
-      }
-      const response = await this.makeSlackApiCall(
-        isFirstChunk && thinkingMessageTs ? 'chat.update' : 'chat.postMessage',
-        body
-      );
+      const response = await this.makeSlackApiCall('chat.postMessage', body);
 
       if (!response.ok) {
         errors.push(

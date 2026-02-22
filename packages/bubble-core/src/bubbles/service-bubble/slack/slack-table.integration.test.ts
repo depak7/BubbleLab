@@ -112,6 +112,58 @@ describe('Slack table block integration', () => {
     expect(result.data?.ts).toBeDefined();
   });
 
+  it('should send message with pricing comparison charts, table, and image URLs', async () => {
+    if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL) {
+      console.log(
+        'Skipping: SLACK_BOT_TOKEN or SLACK_REMINDER_CHANNEL not set'
+      );
+      return;
+    }
+    // Even if R2 presigned URLs expire, the retry logic strips broken image
+    // blocks and resends — so the message should always succeed.
+    const result = await runSlackTest(BLOCKS.pricingComparisonCharts);
+    expect(result.success).toBe(true);
+    expect(result.data?.ok).toBe(true);
+    expect(result.data?.ts).toBeDefined();
+  });
+
+  it('should replace a thinking placeholder with pricing comparison (delete + post)', async () => {
+    if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL) {
+      console.log(
+        'Skipping: SLACK_BOT_TOKEN or SLACK_REMINDER_CHANNEL not set'
+      );
+      return;
+    }
+    // Simulate prod: send thinking placeholder, then replace via executionMeta
+    const placeholder = new SlackBubble({
+      operation: 'send_message',
+      channel: SLACK_CHANNEL!,
+      text: ':hourglass: Thinking...',
+      credentials,
+    });
+    const placeholderResult = await placeholder.action();
+    expect(placeholderResult.success).toBe(true);
+    const ts = placeholderResult.data?.ts;
+    expect(ts).toBeDefined();
+
+    // Now send the real message with executionMeta pointing to the placeholder
+    const sender = new SlackBubble({
+      operation: 'send_message',
+      channel: SLACK_CHANNEL!,
+      text: BLOCKS.pricingComparisonCharts,
+      credentials,
+    });
+    const result = await sender.action({
+      executionMeta: {
+        _thinkingMessageTs: ts!,
+        _thinkingMessageChannel: SLACK_CHANNEL!,
+      },
+    } as Parameters<typeof sender.action>[0]);
+    console.log('Replace result:', JSON.stringify(result, null, 2));
+    expect(result.success).toBe(true);
+    expect(result.data?.ok).toBe(true);
+  });
+
   it('should send all test messages at once', async () => {
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL) {
       console.log(
