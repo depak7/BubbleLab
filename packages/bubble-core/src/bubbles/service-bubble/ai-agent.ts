@@ -325,7 +325,7 @@ const AIAgentParamsSchema = z.object({
     .array(ToolConfigSchema)
     .default([])
     .describe(
-      'Array of pre-registered tools the AI agent can use. Can be tool types (web-search-tool, web-scrape-tool, web-crawl-tool, web-extract-tool, instagram-tool). If using image models, set the tools to []'
+      'Array of tool config objects: [{ name: "web-search-tool" }, { name: "web-scrape-tool" }]. Each object requires a "name" field. Available tool names: web-search-tool, web-scrape-tool, web-crawl-tool, web-extract-tool, instagram-tool. If using image models, set tools to []'
     ),
   customTools: z
     .array(CustomToolSchema)

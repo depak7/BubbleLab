@@ -125,7 +125,7 @@ export async function applyCapabilityPostprocessing(
     bubbleContext,
     resolveCapabilityCredentials
   );
-  updated = applyConversationHistoryNotice(updated, params);
+  updated = applyConversationHistoryNotice(updated, params, bubbleContext);
   return updated;
 }
 
@@ -181,8 +181,13 @@ function hasUnenhancedConversationHistory(
 
 function applyConversationHistoryNotice(
   result: AIAgentResult,
-  params: AIAgentParamsParsed
+  params: AIAgentParamsParsed,
+  bubbleContext: BubbleContext | undefined
 ): AIAgentResult {
+  // Only relevant for Slack bot flows
+  if (!bubbleContext?.executionMeta?._isSlackBot) {
+    return result;
+  }
   const caps = params.capabilities ?? [];
   // Show for any capability-enabled main agent, not delegated sub-agents
   if (caps.length === 0 || params.name?.startsWith('Capability Agent: ')) {
