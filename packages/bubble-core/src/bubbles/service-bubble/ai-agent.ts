@@ -634,16 +634,39 @@ export class AIAgentBubble extends ServiceBubble<
     // Extract execution metadata (used for conversation history + agent memory)
     const execMeta = this.context?.executionMeta;
 
+    // Memory injection — tools, prompt, and reflection are built externally (Pro)
+    // and passed via executionMeta. This keeps all memory logic out of OSS.
+    const isCapabilityAgent = this.params.name?.startsWith('Capability Agent:');
+
     // Inject Slack channel context into system prompt
-    const slackChannel = execMeta?._slackChannel;
-    if (slackChannel) {
-      this.params.systemPrompt = `${this.params.systemPrompt}\n**Current Slack channel:** ${slackChannel}`;
+    // Skip for capability agents (e.g. memory) — they only need their own prompt
+    if (!isCapabilityAgent) {
+      const slackChannel = execMeta?._slackChannel;
+      if (slackChannel) {
+        this.params.systemPrompt = `${this.params.systemPrompt}\n**Current Slack channel:** ${slackChannel}`;
+      }
+
+      // Inject bot identity and mention format context
+      const botDisplayName = execMeta?._selfBotDisplayName as
+        | string
+        | undefined;
+      const selfBotUserId = execMeta?._selfBotUserId as string | undefined;
+      if (botDisplayName) {
+        let botContext = `**Your Slack identity:** ${botDisplayName}`;
+        if (selfBotUserId) {
+          botContext += ` (user ID: ${selfBotUserId})`;
+        }
+        botContext += `\nIn Slack messages, \`<@userId>\` is a mention — when you see \`<@${selfBotUserId ?? 'your_id'}>\`, that's someone addressing you.`;
+        botContext += `\nConversation messages are prefixed with \`[Name (userId)]\` — this tells you who sent each message. Use these names when addressing users.`;
+        this.params.systemPrompt = `${this.params.systemPrompt}\n${botContext}`;
+      }
     }
 
     // Auto-inject trigger conversation history if no explicit conversationHistory was provided
     // This enables Slack thread context to automatically flow into AI agents
+    // Skip for capability agents (e.g. memory) — they only need their own prompt
     // Check both legacy path (context.triggerConversationHistory) and new path (executionMeta)
-    if (!this.params.conversationHistory?.length) {
+    if (!isCapabilityAgent && !this.params.conversationHistory?.length) {
       const convHistory =
         (execMeta?.triggerConversationHistory as
           | Array<{ role: 'user' | 'assistant'; content: string }>
@@ -655,10 +678,6 @@ export class AIAgentBubble extends ServiceBubble<
         this.params.conversationHistory = convHistory;
       }
     }
-
-    // Memory injection — tools, prompt, and reflection are built externally (Pro)
-    // and passed via executionMeta. This keeps all memory logic out of OSS.
-    const isCapabilityAgent = this.params.name?.startsWith('Capability Agent:');
 
     if (!isCapabilityAgent && this.params.memoryEnabled) {
       const memoryTools = execMeta?.memoryTools;
@@ -2318,6 +2337,7 @@ export class AIAgentBubble extends ServiceBubble<
     try {
       // Build messages array starting with conversation history (for KV cache optimization)
       const initialMessages: BaseMessage[] = [];
+      let enrichedMessage: string | undefined;
 
       // Resume from saved agent state (lossless — preserves tool_calls, etc.)
       const resumeExecMeta = this.context?.executionMeta;
@@ -2430,7 +2450,9 @@ export class AIAgentBubble extends ServiceBubble<
       } else if (conversationHistory && conversationHistory.length > 0) {
         // Normal path: lossy ConversationMessage[] → BaseMessage[]
         // This enables KV cache optimization by keeping previous turns as separate messages
-        // Pop the trigger (last entry) — it will be re-appended as the raw humanMessage
+        // Pop the trigger (last entry) — its enriched content replaces the raw message below
+        const lastHistoryMsg =
+          conversationHistory[conversationHistory.length - 1];
         for (const historyMsg of conversationHistory.slice(0, -1)) {
           switch (historyMsg.role) {
             case 'user':
@@ -2453,9 +2475,16 @@ export class AIAgentBubble extends ServiceBubble<
               break;
           }
         }
+        // Use the enriched content from the last conversation history entry
+        // (includes user name, timezone) instead of the raw trigger message
+        if (lastHistoryMsg.role === 'user') {
+          enrichedMessage = lastHistoryMsg.content;
+        }
       }
 
       // Create the current human message with text and optional images
+      // Prefer enriched message (with user name/timezone) over raw trigger text
+      const triggerMessage = enrichedMessage ?? message;
       let humanMessage: HumanMessage;
 
       if (images && images.length > 0) {
@@ -2470,7 +2499,7 @@ export class AIAgentBubble extends ServiceBubble<
           type: string;
           text?: string;
           image_url?: { url: string };
-        }> = [{ type: 'text', text: message }];
+        }> = [{ type: 'text', text: triggerMessage }];
 
         // Add images to content
         for (const image of images) {
@@ -2526,7 +2555,7 @@ export class AIAgentBubble extends ServiceBubble<
         humanMessage = new HumanMessage({ content });
       } else {
         // Text-only message
-        humanMessage = new HumanMessage(message);
+        humanMessage = new HumanMessage(triggerMessage);
       }
 
       // In the resume flow the trigger message is already part of the saved
