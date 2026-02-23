@@ -25,6 +25,7 @@ import {
 } from '../../types/available-tools.js';
 import { BubbleFactory } from '../../bubble-factory.js';
 import type { BubbleName, BubbleResult } from '@bubblelab/shared-schemas';
+import type { CapabilityInput } from '@bubblelab/shared-schemas';
 import type { StreamingEvent } from '@bubblelab/shared-schemas';
 import { ConversationMessageSchema } from '@bubblelab/shared-schemas';
 import {
@@ -435,6 +436,25 @@ export type AIAgentParamsParsed = z.output<typeof AIAgentParamsSchema> & {
 };
 
 export type AIAgentResult = z.output<typeof AIAgentResultSchema>;
+
+function mergeCapabilityInputDefaults(
+  inputDefs: CapabilityInput[] | undefined,
+  userInputs: Record<string, string | number | boolean | string[]> | undefined
+): Record<string, string | number | boolean | string[]> {
+  const merged: Record<string, string | number | boolean | string[]> = {};
+  if (inputDefs) {
+    for (const def of inputDefs) {
+      if (def.default !== undefined) {
+        merged[def.name] = def.default;
+      }
+    }
+  }
+  // User values override defaults
+  if (userInputs) {
+    Object.assign(merged, userInputs);
+  }
+  return merged;
+}
 
 export class AIAgentBubble extends ServiceBubble<
   AIAgentParamsParsed,
@@ -1324,7 +1344,10 @@ export class AIAgentBubble extends ServiceBubble<
         try {
           const ctx: CapabilityRuntimeContext = {
             credentials: this.resolveCapabilityCredentials(capDef, capConfig),
-            inputs: capConfig.inputs ?? {},
+            inputs: mergeCapabilityInputDefaults(
+              capDef.metadata.inputs,
+              capConfig.inputs
+            ),
             bubbleContext: this.context,
           };
           const toolFuncs = capDef.createTools(ctx);
@@ -1481,7 +1504,10 @@ export class AIAgentBubble extends ServiceBubble<
           // Shared ctx captured by all tool funcs via closure — we mutate bubbleContext per-tool
           const ctx: CapabilityRuntimeContext = {
             credentials: this.resolveCapabilityCredentials(capDef, capConfig),
-            inputs: capConfig.inputs ?? {},
+            inputs: mergeCapabilityInputDefaults(
+              capDef.metadata.inputs,
+              capConfig.inputs
+            ),
             bubbleContext: this.context,
           };
           const toolFuncs = capDef.createTools(ctx);
