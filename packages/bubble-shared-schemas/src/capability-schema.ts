@@ -20,6 +20,7 @@ export type CapabilityId =
   | 'ashby-assistant'
   | 'google-sheets-assistant'
   | 'slack-assistant'
+  | 'google-docs-assistant'
   | 'google-drive-assistant'
   | 'confluence-assistant'
   | 'telegram-assistant'

@@ -311,6 +311,10 @@ export function formatFinalResponse(
       // Return the combined text (even if not JSON)
       return { response: combinedText };
     }
+
+    // Array had no extractable text (e.g. only tool_use/thinking blocks) —
+    // return empty string instead of raw JSON.stringify
+    return { response: '' };
   }
 
   console.log(

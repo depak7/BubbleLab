@@ -12,6 +12,7 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import {
   HumanMessage,
   AIMessage,
+  SystemMessage,
   ToolMessage,
   AIMessageChunk,
 } from '@langchain/core/messages';
@@ -1963,7 +1964,7 @@ export class AIAgentBubble extends ServiceBubble<
       // Use cache_control for Anthropic models to cache the system prompt across iterations
       const isAnthropic = llm instanceof ChatAnthropic;
       const systemMessage = isAnthropic
-        ? new HumanMessage({
+        ? new SystemMessage({
             content: [
               {
                 type: 'text' as const,
@@ -1972,7 +1973,7 @@ export class AIAgentBubble extends ServiceBubble<
               },
             ],
           })
-        : new HumanMessage(systemPrompt);
+        : new SystemMessage(systemPrompt);
       const allMessages = [systemMessage, ...messages];
 
       // Helper function for exponential backoff with jitter
@@ -2392,11 +2393,19 @@ export class AIAgentBubble extends ServiceBubble<
           }
         }
 
+        // Clear pre-approval flag after resume repair executed the tool directly.
+        // This prevents the agent loop from approving a duplicate call if the LLM
+        // re-emits the same tool invocation.
+        if (approvalAiMsgIndex >= 0 && resumeExecMeta?._approvedAction) {
+          delete resumeExecMeta._approvedAction;
+        }
+
         initialMessages.push(...repairedMessages);
       } else if (conversationHistory && conversationHistory.length > 0) {
         // Normal path: lossy ConversationMessage[] → BaseMessage[]
         // This enables KV cache optimization by keeping previous turns as separate messages
-        for (const historyMsg of conversationHistory) {
+        // Pop the trigger (last entry) — it will be re-appended as the raw humanMessage
+        for (const historyMsg of conversationHistory.slice(0, -1)) {
           switch (historyMsg.role) {
             case 'user':
               initialMessages.push(new HumanMessage(historyMsg.content));
@@ -2494,8 +2503,13 @@ export class AIAgentBubble extends ServiceBubble<
         humanMessage = new HumanMessage(message);
       }
 
-      // Add the current message to the conversation
-      initialMessages.push(humanMessage);
+      // In the resume flow the trigger message is already part of the saved
+      // state (it was the HumanMessage that started the original execution).
+      // Re-appending it causes the LLM to see the same request twice, which
+      // triggers a duplicate tool call.  Skip it when resuming.
+      if (!resumeState) {
+        initialMessages.push(humanMessage);
+      }
 
       const result = await graph.invoke(
         { messages: initialMessages },

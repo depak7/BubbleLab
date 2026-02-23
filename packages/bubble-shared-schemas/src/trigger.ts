@@ -136,6 +136,8 @@ export interface SlackThreadHistoryMessage {
   message: string;
   /** Private download URLs for images attached to the message */
   image_url_private_downloads?: string[];
+  /** Whether this message is from a bot */
+  is_bot?: boolean;
 }
 
 // Slack Event Wrapper (outer payload)
