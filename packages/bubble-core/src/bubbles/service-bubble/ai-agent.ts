@@ -489,7 +489,26 @@ export class AIAgentBubble extends ServiceBubble<
   private shouldStopAfterTools = false;
   private shouldContinueToAgent = false;
   private rescueAttempts = 0;
+  /** Current graph messages — kept in sync by executeToolsWithHooks so that
+   *  the use-capability tool can snapshot master state before delegation. */
+  private _currentGraphMessages: BaseMessage[] = [];
+
+  /** Emit a trace event via executionMeta._onTrace (if wired by the host). */
+  private _trace(
+    source: string,
+    message: string,
+    data?: Record<string, unknown>
+  ): void {
+    const onTrace = (
+      this.context?.executionMeta as Record<string, unknown> | undefined
+    )?._onTrace;
+    if (typeof onTrace === 'function') {
+      onTrace(source, message, data);
+    }
+  }
   private static readonly MAX_RESCUE_ATTEMPTS = 1;
+  /** Max characters for a single tool result before truncation (~50k chars ≈ ~12k tokens). */
+  private static readonly MAX_TOOL_RESULT_CHARS = 50_000;
 
   constructor(
     params: AIAgentParams = {
@@ -1484,6 +1503,31 @@ export class AIAgentBubble extends ServiceBubble<
             if (!capConfig || !capDef)
               return { error: `Capability "${capabilityId}" not found` };
 
+            // Snapshot master agent state before delegation so that the
+            // subagent's beforeToolCall hook can save both states if an
+            // approval interrupt is triggered (fixes multi-cap state leak).
+            const execMeta = this.context?.executionMeta;
+            if (execMeta && this._currentGraphMessages.length > 0) {
+              const { mapChatMessagesToStoredMessages } = await import(
+                '@langchain/core/messages'
+              );
+              execMeta._masterAgentSnapshot = {
+                messages: mapChatMessagesToStoredMessages(
+                  this._currentGraphMessages
+                ) as unknown as Array<Record<string, unknown>>,
+                capabilityId,
+                capabilityTask: task,
+              };
+              this._trace(
+                'use-capability',
+                `snapshotted master state before delegating`,
+                {
+                  masterMsgCount: this._currentGraphMessages.length,
+                  capabilityId,
+                }
+              );
+            }
+
             const subAgent = new AIAgentBubble(
               {
                 message: task,
@@ -1498,6 +1542,19 @@ export class AIAgentBubble extends ServiceBubble<
             );
 
             const result = await subAgent.action();
+
+            // Clean up snapshot after delegation completes
+            if (execMeta) {
+              delete execMeta._masterAgentSnapshot;
+            }
+
+            this._trace('use-capability', `subAgent returned`, {
+              capabilityId,
+              success: result.success,
+              pendingApproval: !!execMeta?._pendingApproval,
+              shouldStopAfterTools: this.shouldStopAfterTools,
+            });
+
             if (!result.success) {
               return { success: false, error: result.error };
             }
@@ -1793,8 +1850,19 @@ export class AIAgentBubble extends ServiceBubble<
     let currentMessages = [...messages];
     let hooksModifiedMessages = false;
 
+    // Keep master snapshot in sync so use-capability can capture state
+    this._currentGraphMessages = currentMessages;
+
     // Reset stop flag at the start of tool execution
     this.shouldStopAfterTools = false;
+
+    this._trace('executeToolsWithHooks', `ENTRY`, {
+      toolCallCount: toolCalls.length,
+      toolCalls: toolCalls
+        .map((tc) => `${tc.name}(${tc.id?.slice(-8)})`)
+        .join(', '),
+      totalMsgs: messages.length,
+    });
 
     // Execute each tool call
     for (const toolCall of toolCalls) {
@@ -1908,12 +1976,18 @@ export class AIAgentBubble extends ServiceBubble<
         // Execute the tool
         const toolOutput = await tool.invoke(toolCall.args);
 
-        // Create tool message
+        // Create tool message — cap result size to avoid blowing up LLM context
+        let toolContent =
+          typeof toolOutput === 'string'
+            ? toolOutput
+            : JSON.stringify(toolOutput);
+        if (toolContent.length > AIAgentBubble.MAX_TOOL_RESULT_CHARS) {
+          toolContent =
+            toolContent.slice(0, AIAgentBubble.MAX_TOOL_RESULT_CHARS) +
+            `\n\n[... truncated — result was ${toolContent.length} chars, limit is ${AIAgentBubble.MAX_TOOL_RESULT_CHARS}]`;
+        }
         const toolMessage = new ToolMessage({
-          content:
-            typeof toolOutput === 'string'
-              ? toolOutput
-              : JSON.stringify(toolOutput),
+          content: toolContent,
           tool_call_id: toolCall.id!,
         });
 
@@ -2005,6 +2079,19 @@ export class AIAgentBubble extends ServiceBubble<
   ) {
     // Define the agent node
     const agentNode = async ({ messages }: typeof MessagesAnnotation.State) => {
+      this._trace('agentNode', `LLM CALL`, {
+        msgCount: messages.length,
+        lastMsgType: messages[messages.length - 1]?._getType(),
+        lastMsgPreview: (() => {
+          const last = messages[messages.length - 1];
+          if (!last) return '';
+          const content =
+            typeof last.content === 'string'
+              ? last.content
+              : JSON.stringify(last.content);
+          return content.slice(0, 120);
+        })(),
+      });
       // systemPrompt is already enhanced by beforeAction() if expectedOutputSchema was provided
       // Use cache_control for Anthropic models to cache the system prompt across iterations
       const isAnthropic = llm instanceof ChatAnthropic;
@@ -2267,26 +2354,42 @@ export class AIAgentBubble extends ServiceBubble<
 
       // Check if the last AI message has tool calls
       if (lastAIMessage?.tool_calls && lastAIMessage.tool_calls.length > 0) {
+        this._trace('afterLLMCheck', `→ tools`, {
+          toolCalls: lastAIMessage.tool_calls
+            .map((tc) => `${tc.name}(${tc.id?.slice(-8)})`)
+            .join(', '),
+        });
         return 'tools';
       }
+      this._trace('afterLLMCheck', `→ __end__ (no tool calls)`);
       return '__end__';
     };
 
     // Define conditional edge after tools to check if we should stop
     const shouldContinueAfterTools = () => {
+      const execMeta = this.context?.executionMeta;
+      this._trace('shouldContinueAfterTools', `CHECK`, {
+        shouldStop: this.shouldStopAfterTools,
+        pendingApproval: !!execMeta?._pendingApproval,
+      });
       // Check if the afterToolCall hook requested stopping
       if (this.shouldStopAfterTools) {
+        this._trace(
+          'shouldContinueAfterTools',
+          `→ __end__ (shouldStopAfterTools)`
+        );
         return '__end__';
       }
       // Check for pending approval signal from sub-agent (shared via executionMeta).
       // In multi-capability mode the master and sub-agent share the same BubbleContext,
       // so a sub-agent setting _pendingApproval is visible here.
-      const execMeta = this.context?.executionMeta;
       if (execMeta?._pendingApproval) {
+        this._trace('shouldContinueAfterTools', `→ __end__ (pendingApproval)`);
         this.shouldStopAfterTools = true;
         return '__end__';
       }
       // Otherwise continue back to agent
+      this._trace('shouldContinueAfterTools', `→ agent (continue)`);
       return 'agent';
     };
 
@@ -2341,9 +2444,156 @@ export class AIAgentBubble extends ServiceBubble<
 
       // Resume from saved agent state (lossless — preserves tool_calls, etc.)
       const resumeExecMeta = this.context?.executionMeta;
+      const resumeStateV2 = resumeExecMeta?._resumeAgentStateV2;
       const resumeState = resumeExecMeta?._resumeAgentState;
+      // Clear stale _pendingApproval ONLY when actually resuming, so that
+      // non-resume executeAgent calls (e.g. personality reflection) don't
+      // wipe the flag before postFlowAction reads it.
+      if (resumeExecMeta && (resumeStateV2 || resumeState)) {
+        delete resumeExecMeta._pendingApproval;
+      }
 
-      if (resumeState && Array.isArray(resumeState) && resumeState.length > 0) {
+      if (resumeStateV2 && resumeStateV2.__version === 2) {
+        // V2: Multi-cap scoped resume — master and subagent states are separate.
+        // Restore the master's messages, find the pending use-capability call,
+        // inject the subagent's state so it resumes via the V1 path, then
+        // execute the use-capability tool directly.
+        this._trace('v2-resume', `START`, {
+          masterMsgs: resumeStateV2.masterState.length,
+          subagentMsgs: resumeStateV2.subagentState.length,
+          capabilityId: resumeStateV2.capabilityId,
+          task: resumeStateV2.capabilityTask?.slice(0, 80),
+        });
+        const { mapStoredMessagesToChatMessages } = await import(
+          '@langchain/core/messages'
+        );
+        const masterRestored = mapStoredMessagesToChatMessages(
+          resumeStateV2.masterState as unknown as Parameters<
+            typeof mapStoredMessagesToChatMessages
+          >[0]
+        );
+
+        // Collect existing tool results
+        const existingToolResultIds = new Set<string>();
+        for (const msg of masterRestored) {
+          if (msg._getType() === 'tool') {
+            const tm = msg as ToolMessage;
+            if (tm.tool_call_id) existingToolResultIds.add(tm.tool_call_id);
+          }
+        }
+
+        // Build tool lookup for direct execution
+        const toolsByName = new Map<string, DynamicStructuredTool>();
+        if (tools) {
+          for (const t of tools) toolsByName.set(t.name, t);
+        }
+
+        // Inject the subagent's state so the use-capability tool's subagent
+        // picks it up via the V1 resume path in its own executeAgent call.
+        // IMPORTANT: Delete _resumeAgentStateV2 BEFORE tool.invoke() so the
+        // subagent doesn't re-enter the V2 path (it shares executionMeta).
+        if (resumeExecMeta) {
+          resumeExecMeta._resumeAgentState = resumeStateV2.subagentState;
+          delete resumeExecMeta._resumeAgentStateV2;
+        }
+
+        // Repair master messages: find the pending use-capability tool call
+        // and execute it (which re-creates the subagent that resumes via V1).
+        const repairedMessages: BaseMessage[] = [];
+        for (let i = 0; i < masterRestored.length; i++) {
+          repairedMessages.push(masterRestored[i]);
+          const msg = masterRestored[i];
+          if (msg._getType() !== 'ai') continue;
+
+          const aiMsg = msg as AIMessage;
+          const pendingCalls = aiMsg.tool_calls?.filter(
+            (tc) => tc.id && !existingToolResultIds.has(tc.id)
+          );
+          if (!pendingCalls?.length) continue;
+
+          for (const tc of pendingCalls) {
+            if (toolsByName.has(tc.name)) {
+              try {
+                this._trace('v2-resume', `executing tool "${tc.name}"`, {
+                  callId: tc.id,
+                  args: JSON.stringify(tc.args).slice(0, 200),
+                });
+                const tool = toolsByName.get(tc.name)!;
+                // Sync _currentGraphMessages so use-capability can snapshot
+                // master state for the subagent's beforeToolCall hook.
+                // Without this, _masterAgentSnapshot is empty during V2 resume
+                // and subsequent approvals fall to the V1 path, corrupting state.
+                this._currentGraphMessages = [...repairedMessages];
+                const result = await tool.invoke(tc.args);
+                let content =
+                  typeof result === 'string' ? result : JSON.stringify(result);
+                if (content.length > AIAgentBubble.MAX_TOOL_RESULT_CHARS) {
+                  content =
+                    content.slice(0, AIAgentBubble.MAX_TOOL_RESULT_CHARS) +
+                    `\n\n[... truncated — result was ${content.length} chars, limit is ${AIAgentBubble.MAX_TOOL_RESULT_CHARS}]`;
+                }
+                repairedMessages.push(
+                  new ToolMessage({ content, tool_call_id: tc.id! })
+                );
+              } catch (err) {
+                console.warn(
+                  `[AIAgent] V2 resume: tool execution failed for "${tc.name}":`,
+                  err
+                );
+                repairedMessages.push(
+                  new ToolMessage({
+                    content: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`,
+                    tool_call_id: tc.id!,
+                  })
+                );
+              }
+            } else {
+              repairedMessages.push(
+                new ToolMessage({
+                  content:
+                    'This action has been approved by the user. You may now execute this tool.',
+                  tool_call_id: tc.id!,
+                })
+              );
+            }
+            existingToolResultIds.add(tc.id!);
+          }
+        }
+
+        // Clean up remaining resume state and pre-approval flag so that
+        // subsequent subagents (created by normal master loop) don't
+        // accidentally pick up stale state.
+        // Note: _resumeAgentStateV2 already deleted above (before tool.invoke).
+        if (resumeExecMeta) {
+          delete resumeExecMeta._resumeAgentState;
+          delete resumeExecMeta._approvedAction;
+        }
+
+        this._trace('v2-resume', `DONE`, {
+          repairedMessages: repairedMessages.length,
+          types: repairedMessages.map((m) => m._getType()).join(','),
+          pendingApproval: !!resumeExecMeta?._pendingApproval,
+          shouldStopAfterTools: this.shouldStopAfterTools,
+        });
+        // If a new approval was triggered during V2 resume (subagent set _pendingApproval),
+        // we should stop the master loop immediately to avoid re-executing.
+        if (resumeExecMeta?._pendingApproval) {
+          this._trace(
+            'v2-resume',
+            `_pendingApproval detected — will stop master loop`
+          );
+          this.shouldStopAfterTools = true;
+        }
+        initialMessages.push(...repairedMessages);
+      } else if (
+        resumeState &&
+        Array.isArray(resumeState) &&
+        resumeState.length > 0
+      ) {
+        this._trace(
+          'v1-resume',
+          `restoring ${resumeState.length} messages (single-cap/subagent path)`
+        );
         const { mapStoredMessagesToChatMessages } = await import(
           '@langchain/core/messages'
         );
@@ -2408,8 +2658,13 @@ export class AIAgentBubble extends ServiceBubble<
                 );
                 const tool = toolsByName.get(tc.name)!;
                 const result = await tool.invoke(tc.args);
-                const content =
+                let content =
                   typeof result === 'string' ? result : JSON.stringify(result);
+                if (content.length > AIAgentBubble.MAX_TOOL_RESULT_CHARS) {
+                  content =
+                    content.slice(0, AIAgentBubble.MAX_TOOL_RESULT_CHARS) +
+                    `\n\n[... truncated — result was ${content.length} chars, limit is ${AIAgentBubble.MAX_TOOL_RESULT_CHARS}]`;
+                }
                 repairedMessages.push(
                   new ToolMessage({ content, tool_call_id: tc.id! })
                 );
@@ -2562,15 +2817,26 @@ export class AIAgentBubble extends ServiceBubble<
       // state (it was the HumanMessage that started the original execution).
       // Re-appending it causes the LLM to see the same request twice, which
       // triggers a duplicate tool call.  Skip it when resuming.
-      if (!resumeState) {
+      if (!resumeState && !resumeStateV2) {
         initialMessages.push(humanMessage);
       }
+
+      this._trace('agent-loop', `STARTING graph.invoke`, {
+        initialMsgCount: initialMessages.length,
+        initialMsgTypes: initialMessages.map((m) => m._getType()).join(','),
+        shouldStopAfterTools: this.shouldStopAfterTools,
+        maxIterations,
+      });
 
       const result = await graph.invoke(
         { messages: initialMessages },
         { recursionLimit: maxIterations }
       );
 
+      this._trace('agent-loop', `graph.invoke COMPLETED`, {
+        totalMessages: result.messages.length,
+        pendingApproval: !!this.context?.executionMeta?._pendingApproval,
+      });
       console.log('[AIAgent] Graph execution completed');
       console.log('[AIAgent] Total messages:', result.messages.length);
       iterations = result.messages.length;

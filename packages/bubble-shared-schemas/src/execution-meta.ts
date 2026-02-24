@@ -18,6 +18,25 @@ export interface MemoryToolDef {
   func: (input: Record<string, unknown>) => Promise<string>;
 }
 
+/** Snapshot of the master agent's graph messages, stored on executionMeta by
+ *  the `use-capability` tool so that the `beforeToolCall` hook can capture
+ *  both master and subagent state when an approval interrupt is triggered. */
+export interface MasterAgentSnapshot {
+  messages: Array<Record<string, unknown>>;
+  capabilityId: string;
+  capabilityTask: string;
+}
+
+/** V2 structured resume state — stores master and subagent messages separately
+ *  so each agent resumes from its own context (fixes multi-cap state leak). */
+export interface ResumeAgentStateV2 {
+  __version: 2;
+  masterState: Array<Record<string, unknown>>;
+  capabilityId: string;
+  capabilityTask: string;
+  subagentState: Array<Record<string, unknown>>;
+}
+
 export interface ExecutionMeta {
   // Core (set by runtime)
   flowId?: number;
@@ -35,7 +54,10 @@ export interface ExecutionMeta {
   // Approval system
   _originalTriggerPayload?: Record<string, unknown>;
   _resumeAgentState?: Array<Record<string, unknown>>;
+  _resumeAgentStateV2?: ResumeAgentStateV2;
   _pendingApproval?: PendingApproval;
+  /** Transient: set by use-capability, consumed by beforeToolCall hook */
+  _masterAgentSnapshot?: MasterAgentSnapshot;
   // Conversation history
   triggerConversationHistory?: Array<{ role: string; content: string }>;
   // Agent memory

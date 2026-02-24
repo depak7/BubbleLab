@@ -64,7 +64,18 @@ export function applyCodeEdit(
       error: 'new_string must be different from old_string',
     };
   }
-  if (!initialCode.includes(oldString)) {
+
+  // Normalize line endings: LLMs emit \n but Monaco may store \r\n.
+  // We match against a normalized copy of the code but apply edits on the original
+  // so the resulting file preserves whichever line endings it already had.
+  const codeHasCRLF = initialCode.includes('\r\n');
+  const normCode = codeHasCRLF
+    ? initialCode.replace(/\r\n/g, '\n')
+    : initialCode;
+  const normOld = oldString.replace(/\r\n/g, '\n');
+  const normNew = newString.replace(/\r\n/g, '\n');
+
+  if (!normCode.includes(normOld)) {
     return {
       code: initialCode,
       applied: false,
@@ -72,14 +83,19 @@ export function applyCodeEdit(
     };
   }
 
+  // When the original code uses CRLF, convert normalized old/new back to CRLF
+  // so the replacement seamlessly fits the file's existing line endings.
+  const effectiveOld = codeHasCRLF ? normOld.replace(/\n/g, '\r\n') : normOld;
+  const effectiveNew = codeHasCRLF ? normNew.replace(/\n/g, '\r\n') : normNew;
+
   if (replaceAll) {
     return {
-      code: initialCode.replaceAll(oldString, newString),
+      code: initialCode.replaceAll(effectiveOld, effectiveNew),
       applied: true,
     };
   }
 
-  const count = countOccurrences(initialCode, oldString);
+  const count = countOccurrences(initialCode, effectiveOld);
   if (count > 1) {
     return {
       code: initialCode,
@@ -89,11 +105,11 @@ export function applyCodeEdit(
     };
   }
 
-  const index = initialCode.indexOf(oldString);
+  const index = initialCode.indexOf(effectiveOld);
   const result =
     initialCode.slice(0, index) +
-    newString +
-    initialCode.slice(index + oldString.length);
+    effectiveNew +
+    initialCode.slice(index + effectiveOld.length);
   return { code: result, applied: true };
 }
 
