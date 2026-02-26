@@ -423,6 +423,10 @@ const GoogleDriveParamsSchema = z.discriminatedUnion('operation', [
       .optional()
       .default('modifiedTime desc')
       .describe('Order results by field (e.g., "name", "modifiedTime desc")'),
+    page_token: z
+      .string()
+      .optional()
+      .describe('Token for fetching next page of results'),
     credentials: z
       .record(z.nativeEnum(CredentialType), z.string())
       .optional()
@@ -1357,7 +1361,14 @@ export class GoogleDriveBubble<
   private async listFiles(
     params: Extract<GoogleDriveParams, { operation: 'list_files' }>
   ): Promise<Extract<GoogleDriveResult, { operation: 'list_files' }>> {
-    const { folder_id, query, max_results, include_folders, order_by } = params;
+    const {
+      folder_id,
+      query,
+      max_results,
+      include_folders,
+      order_by,
+      page_token,
+    } = params;
 
     let searchQuery = '';
 
@@ -1391,6 +1402,10 @@ export class GoogleDriveBubble<
 
     if (searchQuery) {
       queryParams.set('q', searchQuery);
+    }
+
+    if (page_token) {
+      queryParams.set('pageToken', page_token);
     }
 
     const response = await this.makeGoogleApiRequest(
